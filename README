@@ -1,0 +1,4 @@
+# Network packet dissector tool for couchbase
+
+Dissects useful couchbase information for debugging from network packet captures.
+Uses go-packet tool

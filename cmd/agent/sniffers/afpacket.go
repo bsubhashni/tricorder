@@ -1,0 +1,27 @@
+package sniffers
+
+import (
+	"fmt"
+	"time"
+	"github.com/google/gopacket"
+)
+
+type AfpacketHandle struct {
+}
+
+func newAfpacketHandle(device string, snaplen int, blockSize int, numBlocks int,
+	timeout time.Duration) (*AfpacketHandle, error) {
+
+	return nil, fmt.Errorf("Afpacket MMAP sniffing is only available on Linux")
+}
+
+func (h *AfpacketHandle) ReadPacketData() (data []byte, ci gopacket.CaptureInfo, err error) {
+	return data, ci, fmt.Errorf("Afpacket MMAP sniffing is only available on Linux")
+}
+
+func (h *AfpacketHandle) SetBPFFilter(expr string) (_ error) {
+	return fmt.Errorf("Afpacket MMAP sniffing is only available on Linux")
+}
+
+func (h *AfpacketHandle) Close() {
+}

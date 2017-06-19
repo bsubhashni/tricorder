@@ -1,0 +1,20 @@
+#Port configuration for the agent
+port: 3612
+
+#agent mode can be either server or client
+mode: "server"
+
+# Select the network interface to sniff the data. You can use the "any"
+# keyword to sniff on all connected interfaces.
+interface:
+  device: any
+  #Tricorder agent supports three sniffer types:
+  # * pcap, which uses the libpcap library and works on most platforms, but it's
+  # not the fastest option.
+  # * af_packet, which uses memory-mapped sniffing. This option is faster than
+  # libpcap and doesn't require a kernel module, but it's Linux-specific.
+  # * pf_ring, which makes use of an ntop.org project. This setting provides the
+  # best sniffing speed, but it requires a kernel module, and it's Linux-specific.
+  # The default sniffer type is pcap.
+  #interface.type: pcap
+
