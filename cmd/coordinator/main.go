@@ -1,11 +1,12 @@
 package main
 
 import (
-	"gopkg.in/yaml.v2"
-	"log"
-	"io/ioutil"
-	"fmt"
 	"flag"
+	"fmt"
+	"github.com/codahale/hdrhistogram"
+	"gopkg.in/yaml.v2"
+	"io/ioutil"
+	"log"
 )
 
 var coordinatorConfig Config
@@ -22,16 +23,17 @@ func loadConfig(configFile string) {
 }
 
 func start() {
-	fmt.Println("Starting the coordinator")
 	coordinator := Coordinator{
-		config:&coordinatorConfig,
-		agentInfo:make(map[string]*AgentInfo),
+		config:    &coordinatorConfig,
+		agentInfo: make(map[string]*AgentInfo),
+		histogram: hdrhistogram.New(1, 1000*1000, 3),
 	}
 	coordinator.Run()
 }
 
 func main() {
 	configFile := flag.String("config", "./config.yml", "Config file for the tricorder coordinator")
-	loadConfig(*configFile)
+	flag.Parse()
+	loadConfig(fmt.Sprint("./", *configFile))
 	start()
 }

@@ -7,13 +7,14 @@ port: 4816
 
 #Network capture specifics
 capture:
-   #Memcached port info for capture. Captures to/from couchbase packets to the specific port.
-   port: 11210
    #Time intervals between the captures in milliseconds. Use longer time intervals to not starve CPU.
    interval: 5000
    #Period for capture in milliseconds. Captures packets from all agents for the specific time period
    period: 10000
 
+
+#Rest port for graph
+restport: 9180
 
 #Period for which the history is saved
 history:
