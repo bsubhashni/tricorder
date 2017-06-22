@@ -7,7 +7,7 @@ mode: "server"
 # Select the network interface to sniff the data. You can use the "any"
 # keyword to sniff on all connected interfaces.
 interface:
-  device: any
+  device: lo0
   #Tricorder agent supports three sniffer types:
   # * pcap, which uses the libpcap library and works on most platforms, but it's
   # not the fastest option.
@@ -16,5 +16,7 @@ interface:
   # * pf_ring, which makes use of an ntop.org project. This setting provides the
   # best sniffing speed, but it requires a kernel module, and it's Linux-specific.
   # The default sniffer type is pcap.
-  #interface.type: pcap
+  type: pcap
+  #memcached port to capture traffic
+  port: 11210
 

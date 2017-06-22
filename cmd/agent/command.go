@@ -1,26 +1,26 @@
 package main
 
-
 import (
-	"time"
 	"bytes"
-	"log"
 	"encoding/binary"
 	"io"
+	"log"
+	"time"
 )
 
 type Command struct {
-	state 			ParserState
-	commandType 		CommandType
-	Opcode 			string
-	magic			uint8
-	Opaque			uint32
-	keyLength		uint16
-	extrasLength		uint8
-	valueLength		uint32
-	cas			uint32
-	partial			[]byte
-	CaptureTimeInNanos	int
+	state              ParserState
+	commandType        CommandType
+	opcode             string
+	magic              uint8
+	opaque             uint32
+	keyLength          uint16
+	extrasLength       uint8
+	valueLength        uint32
+	cas                uint32
+	key				   []byte
+	partial            []byte
+	captureTimeInNanos int
 }
 
 type ParserState int
@@ -43,16 +43,15 @@ const (
 type Opcode string
 
 const (
-	GET = "0"
-	SET = "1"
+	GET     = "0"
+	SET     = "1"
 	IGNORED = "IGNORED"
-
 )
 
 func NewCommand() *Command {
 	return &Command{
-		state:       		parseStateHeader,
-		CaptureTimeInNanos: 	time.Now().Nanosecond(),
+		state:              parseStateHeader,
+		captureTimeInNanos: time.Now().Nanosecond(),
 	}
 }
 
@@ -67,7 +66,7 @@ func (c *Command) ReadNewPacketData(data *bytes.Buffer) error {
 				if err == io.EOF {
 					return err
 				} else {
-					log.Fatalf("Failed parsing packet at partial %v due to %v", c.state, err)
+					log.Fatalf("Failed parsing packet at partial %v", c.state, err)
 				}
 			} else {
 				c.partial = append(c.partial, b)
@@ -79,16 +78,16 @@ func (c *Command) ReadNewPacketData(data *bytes.Buffer) error {
 
 		if len(c.partial) > 0 {
 			if n, err := header.Write(c.partial); err != nil {
-				log.Fatalf("Failed parsing packet at partial %v due to %v", c.state, err)
+				log.Fatalf("Failed parsing packet at partial %v", c.state, err)
 			} else {
-				header.Write(data.Next(24-n))
+				header.Write(data.Next(24 - n))
 			}
 		} else {
 			header.Write(data.Next(24))
 		}
 
 		if magic, err := header.ReadByte(); err != nil {
-			log.Fatal("Failed parsing packet at magic %v due to %v", c.state, err)
+			log.Fatal("Failed parsing packet at magic %v", c.state, err)
 		} else {
 			c.magic = magic
 			if c.magic == 0x80 {
@@ -98,17 +97,18 @@ func (c *Command) ReadNewPacketData(data *bytes.Buffer) error {
 			}
 		}
 
-
 		if opcode, err := header.ReadByte(); err != nil {
-			log.Fatal("Failed parsing packet opcode %v due to %v", c.state, err)
+			log.Fatal("Failed parsing packet opcode %v", err)
 		} else {
 			if opcode == 0x0 {
-				c.Opcode = GET
+				c.opcode = GET
 			} else if opcode == 0x1 {
-				c.Opcode = SET
+				c.opcode = SET
 			} else {
-				c.Opcode = IGNORED
+				c.opcode = IGNORED
 			}
+
+
 		}
 
 		keyLenBytes := header.Next(2)
@@ -124,7 +124,7 @@ func (c *Command) ReadNewPacketData(data *bytes.Buffer) error {
 		c.valueLength = totalBodyLength - uint32(c.keyLength) - uint32(c.extrasLength)
 
 		opaqueBytes := header.Next(4)
-		c.Opaque = binary.BigEndian.Uint32(opaqueBytes)
+		c.opaque = binary.BigEndian.Uint32(opaqueBytes)
 		header.Next(2) //cas
 
 		if data.Len() > 0 && c.extrasLength > 0 {
@@ -164,7 +164,14 @@ func (c *Command) ReadNewPacketData(data *bytes.Buffer) error {
 		keyLen := int(c.keyLength)
 
 		if data.Len() >= keyLen {
-			data.Next(keyLen)
+			if c.key == nil {
+				c.key = data.Next(keyLen)
+			} else {
+				for i := 0; i < keyLen; i++ {
+					byte, _ := data.ReadByte()
+					c.key = append(c.key, byte)
+				}
+			}
 			if c.valueLength > 0 {
 				c.state = parseStateValue
 			} else {

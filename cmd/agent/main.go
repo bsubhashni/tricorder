@@ -2,15 +2,14 @@ package main
 
 import (
 	pb "../../rpc"
-
-	"net"
-	"log"
-	"google.golang.org/grpc/reflection"
-	"google.golang.org/grpc"
+	"flag"
 	"fmt"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
-	"flag"
+	"log"
+	"net"
 )
 
 var agentConfig AgentConfig
@@ -28,14 +27,16 @@ func loadConfig(configFile string) {
 
 func start() {
 	fmt.Printf("Starting the agent at %v", agentConfig.Port)
-	lis, err := net.Listen("tcp", fmt.Sprint(":",agentConfig.Port))
+	lis, err := net.Listen("tcp", fmt.Sprint(":", agentConfig.Port))
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
-	pb.RegisterAgentServiceServer(s, &Agent{
-		config:&agentConfig,
-	})
+	agent := &Agent{
+		config: &agentConfig,
+	}
+	agent.Initialize()
+	pb.RegisterAgentServiceServer(s, agent)
 	// Register reflection service on gRPC server.
 	reflection.Register(s)
 	if err := s.Serve(lis); err != nil {
@@ -44,7 +45,8 @@ func start() {
 }
 
 func main() {
-	configFile := flag.String("config", "./config.yml", "Config file for the tricorder agent")
-	loadConfig(*configFile)
+	configFile := flag.String("config", "config.yml", "Config file for the tricorder agent")
+	flag.Parse()
+	loadConfig(fmt.Sprint("./", *configFile))
 	start()
 }

@@ -1,75 +1,133 @@
 package main
 
 import (
+	pb "../../rpc"
+	"./sniffers"
+	"fmt"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
-	"./sniffers"
+	"golang.org/x/net/context"
 	"io"
-	pb "../../rpc"
-	context "golang.org/x/net/context"
-	"fmt"
+	"log"
+	"os"
 	"strconv"
+	"sync"
 )
 
 type Agent struct {
-	pcapHandle     		*pcap.Handle
-	afpacketHandle 		*sniffers.AfpacketHandle
-	config         		*AgentConfig
-	isHandleAlive        	bool
-	filter 			string
-	dataSource 		gopacket.PacketDataSource
-	streams 		map[string]*Stream
+	packetSource  *gopacket.PacketSource
+	config        *AgentConfig
+	isHandleAlive bool
+	filter        string
+	streams       map[uint64]*Stream
+}
+
+// Computes the block_size and the num_blocks in such a way that the
+// allocated mmap buffer is close to but smaller than target_size_mb.
+// The restriction is that the block_size must be divisible by both the
+// frame size and page size.
+func afpacketComputeSize(targetSizeMb int, snaplen int, pageSize int) (
+	frameSize int, blockSize int, numBlocks int, err error) {
+
+	if snaplen < pageSize {
+		frameSize = pageSize / (pageSize / snaplen)
+	} else {
+		frameSize = (snaplen/pageSize + 1) * pageSize
+	}
+	// 128 is the default from the gopacket library so just use that
+	blockSize = frameSize * 128
+	numBlocks = (targetSizeMb * 1024 * 1024) / blockSize
+
+	if numBlocks == 0 {
+		return 0, 0, 0, fmt.Errorf("Buffer size too small")
+	}
+	return frameSize, blockSize, numBlocks, nil
+}
+
+func (agent *Agent) Initialize() {
+	snaplen := 1600
+	filter := fmt.Sprint("tcp and port ", agent.config.InterfaceConfig.Port)
+	if agent.config.InterfaceConfig.CaptureType == AF_PACKET {
+		var afpacketHandle *sniffers.AfpacketHandle
+		_, blockSize, numBlocks, err := afpacketComputeSize(agent.config.InterfaceConfig.AfPacketTragetSizeInMB,
+			snaplen, os.Getpagesize())
+		afpacketHandle, err = sniffers.NewAfpacketHandle(agent.config.InterfaceConfig.Device, snaplen, blockSize, numBlocks, 30)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err = afpacketHandle.SetBPFFilter(filter); err != nil {
+			log.Fatal(err)
+		} else {
+			agent.packetSource = afpacketHandle.GetPacketSource()
+		}
+	} else if agent.config.InterfaceConfig.CaptureType == PF_RING {
+		var pfringHandle *sniffers.PfringHandle
+		pfringHandle, err := sniffers.NewPfringHandle(agent.config.InterfaceConfig.Device, snaplen, true)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pfringHandle.Enable()
+		if err := pfringHandle.SetBPFFilter(filter); err != nil {
+			log.Fatal(err)
+		} else {
+			agent.packetSource = pfringHandle.GetPacketSource()
+		}
+	} else {
+		var handle *pcap.Handle
+		handle, err := pcap.OpenLive(agent.config.InterfaceConfig.Device, int32(snaplen), true, pcap.BlockForever)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := handle.SetBPFFilter(filter); err != nil { // optional
+			log.Fatal(err)
+		} else {
+			agent.packetSource = gopacket.NewPacketSource(handle, handle.LinkType())
+		}
+	}
+
+	agent.packetSource.DecodeOptions.NoCopy = true
 }
 
 func (agent *Agent) handlePacket(packet gopacket.Packet) {
 	transport := packet.TransportLayer()
-	streamKey := transport.TransportFlow().Src().String() + transport.TransportFlow().Dst().String()
-	streamKeyI := transport.TransportFlow().Dst().String() + transport.TransportFlow().Src().String()
-	if agent.streams[streamKeyI] != nil {
-		streamKey = streamKeyI
-	}
+	streamKey := transport.TransportFlow().FastHash()
 	if agent.streams[streamKey] == nil {
 		agent.streams[streamKey] = &Stream{
-			currentRequests:make(map[uint32]*Command),
-			currentResponses:make(map[uint32]*Command),
-			src:transport.TransportFlow().Src().String(),
-			dst:transport.TransportFlow().Dst().String(),
+			currentRequests:  make(map[uint32]*Command),
+			currentResponses: make(map[uint32]*Command),
+			src:              transport.TransportFlow().Src().String(),
+			dst:              transport.TransportFlow().Dst().String(),
+			mutex:			  &sync.Mutex{},
 		}
 	}
 	agent.streams[streamKey].HandlePacket(transport.LayerPayload())
 }
 
-func (agent *Agent) startCapture() error {
-	if handle, err := pcap.OpenLive("lo0", 1600, true, pcap.BlockForever); err != nil {
-		panic(err)
+func (agent *Agent) startCapture() {
+	agent.isHandleAlive = true
+	agent.streams = make(map[uint64]*Stream)
 
-	} else if err := handle.SetBPFFilter("tcp and port 11210"); err != nil {  // optional
-		panic(err)
-	} else {
-		packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-		packetSource.DecodeOptions.NoCopy = true
-		packetSource.DecodeOptions.Lazy = true
-		agent.isHandleAlive = true
-		for agent.isHandleAlive {
-			packet, err := packetSource.NextPacket()
-			if err == io.EOF {
-				agent.isHandleAlive = false
-				fmt.Printf("handle is no longer alive")
-				break
-			}
-			agent.handlePacket(packet)
+	for agent.isHandleAlive {
+		packet, err := agent.packetSource.NextPacket()
+
+		if err == io.EOF {
+			agent.isHandleAlive = false
+			fmt.Printf("handle is no longer alive")
+			break
 		}
+		agent.handlePacket(packet)
 	}
-	return nil
 }
 
-func (agent *Agent) GetResults() ([]*pb.AgentResultsResponse_CaptureInfo) {
+func (agent *Agent) GetResults() []*pb.AgentResultsResponse_CaptureInfo {
 	var responseStats []*pb.AgentResultsResponse_CaptureInfo
 	for streamkey, stream := range agent.streams {
-		for _, latencyInfo := range stream.stats {
+
+		for _, row := range stream.latencyInfo {
 			responseStats = append(responseStats, &pb.AgentResultsResponse_CaptureInfo{
-				Opaque:strconv.Itoa(int(latencyInfo.Opaque)) + streamkey,
-				Latency:strconv.Itoa(latencyInfo.Latency),
+				Opaque:  strconv.Itoa(int(row.Opaque)) + strconv.FormatUint(streamkey, 10),
+				Latency: strconv.Itoa(row.Latency),
+				Key: row.Key,
 			})
 		}
 	}
@@ -82,24 +140,22 @@ func (agent *Agent) Hello(context.Context, *pb.CoordinatorInfo) (*pb.AgentInfo, 
 }
 
 func (agent *Agent) CaptureSignal(context.Context, *pb.CoordinatorCaptureRequest) (*pb.AgentCaptureResponse, error) {
-	agent.streams = make(map[string]*Stream)
 	go agent.startCapture()
 	return &pb.AgentCaptureResponse{Status: "success"}, nil
 }
 
 func (agent *Agent) GoodByeSignal(context.Context, *pb.CoordinatorGoodByeRequest) (*pb.AgentGoodByeResponse, error) {
 	agent.isHandleAlive = false
-	agent.streams = make(map[string]*Stream)
+	agent.streams = make(map[uint64]*Stream)
 	return &pb.AgentGoodByeResponse{Status: "success"}, nil
 }
 
-
 func (agent *Agent) AgentResults(context.Context, *pb.CoordinatorResultsRequest) (*pb.AgentResultsResponse, error) {
 	agent.isHandleAlive = false
-	responseStats := agent.GetResults()
-	return &pb.AgentResultsResponse {
+	latencyCapture := agent.GetResults()
+	return &pb.AgentResultsResponse{
 		Status: "success",
-		Type:agent.config.Mode,
-		Result: responseStats,
+		Type:   agent.config.Mode,
+		Result: latencyCapture,
 	}, nil
 }

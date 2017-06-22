@@ -44,6 +44,7 @@ message AgentResultsResponse {
     message CaptureInfo {
         string opaque = 1;
         string latency = 2;
+        string key = 3;
     }
     string status = 1;
     string type = 2;
