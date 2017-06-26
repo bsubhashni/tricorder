@@ -3,7 +3,6 @@ package main
 type AgentConfig struct {
 	Port            int             `yaml:"port"`
 	InterfaceConfig InterfaceConfig `yaml:"interface"`
-	Mode            string          `yaml:"mode"`
 }
 
 type InterfaceConfig struct {

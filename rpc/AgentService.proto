@@ -40,13 +40,13 @@ message CoordinatorResultsRequest {
 
 }
 
-message AgentResultsResponse {
+message AgentResultsResponse { 
     message CaptureInfo {
-        string opaque = 1;
-        string latency = 2;
-        string key = 3;
+        string oplatency = 1;
+        string key = 2;
+        string opaque = 3;
     }
+   
     string status = 1;
-    string type = 2;
-    repeated CaptureInfo result = 3;
+    map<string, CaptureInfo> captureMap = 2;
 }

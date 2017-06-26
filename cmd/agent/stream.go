@@ -2,39 +2,43 @@ package main
 
 import (
 	"bytes"
+	"sync"
 )
 
 type Stream struct {
+	mutex				*sync.Mutex
 	currentRequests  	map[uint32]*Command
 	currentResponses 	map[uint32]*Command
-	currentCommand		*Command
-	src 			string
-	dst 			string
-	stats			[]LatencyInfo
+	currentCommand   	*Command
+	src              	string
+	dst              	string
+	latencyInfo         []LatencyInfo
 }
 
 type LatencyInfo struct {
-	Opaque  		uint32
-	Latency 		int
+	Opaque  uint32
+	Latency int
+	Key 	string
 }
 
 func (stream *Stream) collect() {
 	for opaque, response := range stream.currentResponses {
 		if response.isComplete() {
-			if stream.currentResponses[opaque].Opcode == IGNORED {
+			if stream.currentResponses[opaque].opcode == IGNORED {
 				delete(stream.currentResponses, opaque)
 			}
-			if val, ok := stream.currentRequests[opaque]; !ok {
+			if request, ok := stream.currentRequests[opaque]; !ok {
 				delete(stream.currentResponses, opaque)
 			} else {
-				if val.Opcode == IGNORED {
+				if request.opcode == IGNORED {
 					delete(stream.currentResponses, opaque)
 				} else {
 					latencyInfo := LatencyInfo{
 						Opaque:  opaque,
-						Latency: (response.CaptureTimeInNanos - val.CaptureTimeInNanos) / 1000,
+						Latency: (response.captureTimeInNanos - request.captureTimeInNanos) / 1000,
+						Key: string(request.key),
 					}
-					stream.stats = append(stream.stats, latencyInfo)
+					stream.latencyInfo = append(stream.latencyInfo, latencyInfo)
 					delete(stream.currentRequests, opaque)
 					delete(stream.currentResponses, opaque)
 				}
@@ -53,18 +57,13 @@ func (stream *Stream) HandlePacket(data []byte) {
 			return
 		}
 		if stream.currentCommand.isComplete() && stream.currentCommand.isResponse() {
-			stream.currentResponses[stream.currentCommand.Opaque] = stream.currentCommand
+			stream.currentResponses[stream.currentCommand.opaque] = stream.currentCommand
 			stream.currentCommand = nil
 		} else if stream.currentCommand.isComplete() && !stream.currentCommand.isResponse() {
-			stream.currentRequests[stream.currentCommand.Opaque] = stream.currentCommand
+			stream.currentRequests[stream.currentCommand.opaque] = stream.currentCommand
 			stream.currentCommand = nil
 		}
 	}
 
 	stream.collect()
-}
-
-
-func (stream *Stream) GetStats() []LatencyInfo {
-	return stream.stats
 }

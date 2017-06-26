@@ -25,7 +25,7 @@ func loadConfig(configFile string) {
 func start() {
 	coordinator := Coordinator{
 		config:    &coordinatorConfig,
-		agentInfo: make(map[string]*AgentInfo),
+		agentsInfo: make(map[string]*AgentInfo),
 		histogram: hdrhistogram.New(1, 1000*1000, 3),
 	}
 	coordinator.Run()

@@ -1,37 +1,40 @@
 package main
 
 import (
-	"google.golang.org/grpc"
-	"fmt"
-	"sync"
 	pb "../../rpc"
-	"log"
 	"context"
-	"time"
-	"os"
 	"database/sql"
+	"fmt"
+	"github.com/codahale/hdrhistogram"
 	_ "github.com/mattn/go-sqlite3"
+	"google.golang.org/grpc"
+	"log"
+	"os"
+	"strconv"
+	"sync"
+	"time"
+	"bytes"
 )
 
-
 type AgentsConfig struct {
-	agent		map[string]string
+	agent map[string]string
 }
 
 type Coordinator struct {
-	config  	*Config
-	agentInfo 	map[string]*AgentInfo
-	db              *sql.DB
+	config    *Config
+	agentsInfo map[string]*AgentInfo
+	db        *sql.DB
+	insertStatementStr string
+	histogram *hdrhistogram.Histogram
 }
 
-
 type AgentInfo struct {
-	index 		int
-	hostname 	string
-	connected 	Status
-	conn 		*grpc.ClientConn
-	client 		pb.AgentServiceClient
-	results		[]LatencyInfo
+	index     int
+	hostname  string
+	connected Status
+	conn      *grpc.ClientConn
+	client    pb.AgentServiceClient
+	results   map[string]*pb.AgentResultsResponse_CaptureInfo
 }
 
 type Status int
@@ -43,10 +46,10 @@ const (
 
 type LatencyInfo struct {
 	nodeType string
+	opaque   string
+	latency  string
 	key string
-	latency string
 }
-
 
 func (coordinator *Coordinator) setupStore() {
 	file := coordinator.config.History.FileName
@@ -55,17 +58,54 @@ func (coordinator *Coordinator) setupStore() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	sqlStmt := `
-	create table ResultStats (id text not null primary key, type text, latency text);
-	delete from ResultStats;
-	`
+	var buffer bytes.Buffer
+	for _, agent := range coordinator.agentsInfo {
+		buffer.WriteString(fmt.Sprint("agent", agent.index))
+		buffer.WriteString(" text")
+		if agent.index < (len(coordinator.agentsInfo) - 1) {
+			buffer.WriteString(", ")
+		}
+	}
+	s := buffer.String()
+	sqlStmt := fmt.Sprintf("create table ResultStats (opaque text not null, key text, %v); delete from ResultStats;", s)
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
 		log.Fatalf("%q: %s\n", err, sqlStmt)
 		return
 	}
-	coordinator.db = db
+	var fieldsBuffer, argsBuffer bytes.Buffer
+	for _, agent := range coordinator.agentsInfo {
+		fieldsBuffer.WriteString(fmt.Sprint("agent", agent.index))
+		argsBuffer.WriteString("?")
+		if agent.index < (len(coordinator.agentsInfo) - 1) {
+			fieldsBuffer.WriteString(", ")
+			argsBuffer.WriteString(", ")
+		}
+	}
+	f := fieldsBuffer.String()
+	a := argsBuffer.String()
 
+	statementStr := fmt.Sprintf("insert into ResultStats(opaque, key, %v) values(?, ?, %v)", f, a)
+	coordinator.insertStatementStr = statementStr
+	coordinator.db = db
+}
+
+func (coordinator *Coordinator) storeFlusher() {
+	currentTime := time.Now().Second()
+	maxHistoryTime := currentTime + coordinator.config.History.Period*60
+	for {
+		if currentTime < maxHistoryTime {
+			time.Sleep(time.Second * time.Duration(maxHistoryTime-currentTime))
+		} else {
+			sqlStmt := `delete from ResultStats;`
+			_, err := coordinator.db.Exec(sqlStmt)
+			if err != nil {
+				log.Fatalf("%q: %s\n", err, sqlStmt)
+				return
+			}
+
+		}
+	}
 }
 
 func connectToAgent(hostName string) (*grpc.ClientConn, error) {
@@ -80,18 +120,18 @@ func (coordinator *Coordinator) ConnectToAgents() {
 			log.Fatalf("Unable to connect to the Agent %v %v", err, hostName)
 		}
 		fmt.Println("Connected to the agent", hostName)
-		coordinator.agentInfo[hostName] = &AgentInfo{
-			index: ii,
-			hostname:hostName,
+		coordinator.agentsInfo[hostName] = &AgentInfo{
+			index:     ii,
+			hostname:  hostName,
 			connected: CONNECTED,
-			conn: conn,
-			client: pb.NewAgentServiceClient(conn),
+			conn:      conn,
+			client:    pb.NewAgentServiceClient(conn),
 		}
 	}
 }
 
-func (coordinator *Coordinator) startCapture(wg *sync.WaitGroup, agentInfo *AgentInfo)  {
-	_, err := agentInfo.client.CaptureSignal(context.Background(), &pb.CoordinatorCaptureRequest{SequencePrefix:int32(agentInfo.index)})
+func (coordinator *Coordinator) startCapture(wg *sync.WaitGroup, agentInfo *AgentInfo) {
+	_, err := agentInfo.client.CaptureSignal(context.Background(), &pb.CoordinatorCaptureRequest{SequencePrefix: int32(agentInfo.index)})
 	if err != nil {
 		log.Fatalf("Unable to start capture on agent %s due to %v", agentInfo.hostname, err)
 	}
@@ -100,8 +140,8 @@ func (coordinator *Coordinator) startCapture(wg *sync.WaitGroup, agentInfo *Agen
 
 func (coordinator *Coordinator) StartCapture() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentInfo))
-	for _, agent := range coordinator.agentInfo {
+	wg.Add(len(coordinator.agentsInfo))
+	for _, agent := range coordinator.agentsInfo {
 		go coordinator.startCapture(&wg, agent)
 	}
 	wg.Wait()
@@ -113,21 +153,48 @@ func (coordinator *Coordinator) mergeAndStore() {
 		log.Fatal(err)
 	}
 
-	stmt, err := tx.Prepare("insert into ResultStats(id, type, latency) values(?, ?, ?)")
+	stmt, err := tx.Prepare(coordinator.insertStatementStr)
+
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("%v", err)
 	}
 
-	for _, agentInfo := range coordinator.agentInfo {
-		fmt.Println("Got", len(agentInfo.results), "results from", agentInfo.hostname)
+	var agentsInfo []*AgentInfo
+	for _, agentInfo := range coordinator.agentsInfo {
+		agentsInfo = append(agentsInfo, agentInfo)
+	}
 
-		for _, row := range agentInfo.results {
-			_, err = stmt.Exec(row.key, row.nodeType, row.latency)
-			if err != nil {
-				log.Fatal(err)
+	for rowKey, row := range agentsInfo[0].results {
+
+		coordinator.histogram.RecordValue(int64(row.Oplatency))
+
+		var args []interface{}
+		args = append(args, rowKey)
+		args = append(args, row.Key)
+		args = append(args, row.Oplatency)
+
+		found := false
+		for i := 1; i < len(agentsInfo); i++ {
+			agent := agentsInfo[i]
+			if row := agent.results[rowKey]; row != nil {
+				args = append(args, row.Oplatency)
+				found = true
 			}
 		}
+		if !found {
+			break
+		}
+
+		_, err = stmt.Exec(args...)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
+
+	for _, agentInfo := range agentsInfo {
+		agentInfo.results = nil
+	}
+
 	tx.Commit()
 }
 
@@ -135,21 +202,16 @@ func (coordinator *Coordinator) getResults(wg *sync.WaitGroup, agentInfo *AgentI
 	if response, err := agentInfo.client.AgentResults(context.Background(), &pb.CoordinatorResultsRequest{}); err != nil {
 		log.Fatalf("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
 	} else {
-		for _, row := range response.Result {
-			agentInfo.results = append(agentInfo.results, LatencyInfo {
-				nodeType:response.Type,
-				key:row.Opaque,
-				latency:row.Latency,
-			})
-		}
+		fmt.Println("Got", len(response.CaptureMap), " results from ", agentInfo.hostname)
+		agentInfo.results = response.CaptureMap
 	}
 	wg.Done()
 }
 
 func (coordinator *Coordinator) GetResults() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentInfo))
-	for _, agent := range coordinator.agentInfo {
+	wg.Add(len(coordinator.agentsInfo))
+	for _, agent := range coordinator.agentsInfo {
 		go coordinator.getResults(&wg, agent)
 	}
 	wg.Wait()
@@ -163,7 +225,6 @@ func (coordinator *Coordinator) sayGoodBye(wg *sync.WaitGroup, agentInfo *AgentI
 	wg.Done()
 }
 
-
 func (coordinator *Coordinator) sayGoodbye(wg *sync.WaitGroup, agentInfo *AgentInfo) {
 	_, err := agentInfo.client.GoodByeSignal(nil, &pb.CoordinatorGoodByeRequest{})
 	if err != nil {
@@ -174,29 +235,25 @@ func (coordinator *Coordinator) sayGoodbye(wg *sync.WaitGroup, agentInfo *AgentI
 
 func (coordinator *Coordinator) ShutDown() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentInfo))
-	for _, agent := range coordinator.agentInfo {
+	wg.Add(len(coordinator.agentsInfo))
+	for _, agent := range coordinator.agentsInfo {
 		go coordinator.sayGoodbye(&wg, agent)
 	}
 	wg.Wait()
 }
 
 func (coordinator *Coordinator) Run() {
-	coordinator.setupStore()
-	currentTime := time.Now().Nanosecond() / (1000 * 1000)
-	maxRunTime := currentTime + coordinator.config.History.Period * 60 * 1000
+	go startRestServer(9180, coordinator.db)
 	coordinator.ConnectToAgents()
+	coordinator.setupStore()
+	go coordinator.storeFlusher()
 
-	for currentTime < maxRunTime {
-
+	for {
 		coordinator.StartCapture()
 		time.Sleep(time.Duration(coordinator.config.Capture.Period) * time.Millisecond)
 		coordinator.GetResults()
-		//storeResults in separate goroutine
 		go coordinator.mergeAndStore()
 		time.Sleep(time.Duration(coordinator.config.Capture.Interval) * time.Millisecond)
-		currentTime = time.Now().Nanosecond() / (1000 * 1000)
 	}
-
 	coordinator.ShutDown()
 }

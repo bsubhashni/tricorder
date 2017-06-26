@@ -119,16 +119,18 @@ func (agent *Agent) startCapture() {
 	}
 }
 
-func (agent *Agent) GetResults() []*pb.AgentResultsResponse_CaptureInfo {
-	var responseStats []*pb.AgentResultsResponse_CaptureInfo
+func (agent *Agent) GetResults() map[string]*pb.AgentResultsResponse_CaptureInfo {
+	responseStats := make(map[string]*pb.AgentResultsResponse_CaptureInfo)
+
 	for streamkey, stream := range agent.streams {
 
 		for _, row := range stream.latencyInfo {
-			responseStats = append(responseStats, &pb.AgentResultsResponse_CaptureInfo{
-				Opaque:  strconv.Itoa(int(row.Opaque)) + strconv.FormatUint(streamkey, 10),
-				Latency: strconv.Itoa(row.Latency),
+
+			responseStats[strconv.Itoa(int(row.Opaque)) + strconv.FormatUint(streamkey, 10)] = &pb.AgentResultsResponse_CaptureInfo{
+				Opaque:strconv.Itoa(int(row.Opaque)),
+				Oplatency:fmt.Sprintf("%v", row.Latency/1000),
 				Key: row.Key,
-			})
+			}
 		}
 	}
 	return responseStats
@@ -152,10 +154,9 @@ func (agent *Agent) GoodByeSignal(context.Context, *pb.CoordinatorGoodByeRequest
 
 func (agent *Agent) AgentResults(context.Context, *pb.CoordinatorResultsRequest) (*pb.AgentResultsResponse, error) {
 	agent.isHandleAlive = false
-	latencyCapture := agent.GetResults()
+	captureMap := agent.GetResults()
 	return &pb.AgentResultsResponse{
 		Status: "success",
-		Type:   agent.config.Mode,
-		Result: latencyCapture,
+		CaptureMap: captureMap,
 	}, nil
 }
