@@ -20,7 +20,7 @@ type Command struct {
 	cas                uint32
 	key				   []byte
 	partial            []byte
-	captureTimeInNanos int
+	captureTimeInNanos int64
 }
 
 type ParserState int
@@ -51,7 +51,7 @@ const (
 func NewCommand() *Command {
 	return &Command{
 		state:              parseStateHeader,
-		captureTimeInNanos: time.Now().Nanosecond(),
+		captureTimeInNanos: time.Now().UnixNano(),
 	}
 }
 

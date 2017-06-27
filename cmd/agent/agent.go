@@ -15,6 +15,7 @@ import (
 )
 
 type Agent struct {
+	mutex		  *sync.Mutex
 	packetSource  *gopacket.PacketSource
 	config        *AgentConfig
 	isHandleAlive bool
@@ -104,8 +105,10 @@ func (agent *Agent) handlePacket(packet gopacket.Packet) {
 }
 
 func (agent *Agent) startCapture() {
+	agent.mutex.Lock() //only one capture can proceed at any point
 	agent.isHandleAlive = true
 	agent.streams = make(map[uint64]*Stream)
+
 
 	for agent.isHandleAlive {
 		packet, err := agent.packetSource.NextPacket()
@@ -117,6 +120,7 @@ func (agent *Agent) startCapture() {
 		}
 		agent.handlePacket(packet)
 	}
+	agent.mutex.Unlock()
 }
 
 func (agent *Agent) GetResults() map[string]*pb.AgentResultsResponse_CaptureInfo {
@@ -136,19 +140,23 @@ func (agent *Agent) GetResults() map[string]*pb.AgentResultsResponse_CaptureInfo
 	return responseStats
 }
 
+func (agent *Agent) shutDown() {
+	agent.isHandleAlive = false
+}
+
 func (agent *Agent) Hello(context.Context, *pb.CoordinatorInfo) (*pb.AgentInfo, error) {
 	//TODO
 	return nil, nil
 }
 
 func (agent *Agent) CaptureSignal(context.Context, *pb.CoordinatorCaptureRequest) (*pb.AgentCaptureResponse, error) {
+	agent.shutDown()
 	go agent.startCapture()
 	return &pb.AgentCaptureResponse{Status: "success"}, nil
 }
 
 func (agent *Agent) GoodByeSignal(context.Context, *pb.CoordinatorGoodByeRequest) (*pb.AgentGoodByeResponse, error) {
-	agent.isHandleAlive = false
-	agent.streams = make(map[uint64]*Stream)
+	agent.shutDown()
 	return &pb.AgentGoodByeResponse{Status: "success"}, nil
 }
 

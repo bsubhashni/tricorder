@@ -1,13 +1,13 @@
 package main
 
 import (
-	"github.com/gorilla/mux"
-	"net/http"
-	"fmt"
-	"log"
-	"io/ioutil"
 	"bytes"
-	"database/sql"
+	"fmt"
+	"github.com/gorilla/mux"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"strconv"
 )
 
 func HomeHandler(w http.ResponseWriter, r *http.Request) {
@@ -16,9 +16,18 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 		log.Fatal(err)
 	} else {
 		var buffer bytes.Buffer
+		jsonStr, err := coordinator.getFullCaptureFromDb()
+		if err != nil {
+			log.Fatal(err)
+		}
 
-		buffer.WriteString( "<script type=\"text/javascript\">")
-		buffer.WriteString("var data3=[1, 8, 10, 16, 25, 30];")
+		buffer.WriteString("<script type=\"text/javascript\">")
+		buffer.WriteString("var data=")
+		buffer.WriteString(jsonStr)
+		buffer.WriteString(";")
+		buffer.WriteString("var yMax=")
+		buffer.WriteString(strconv.FormatInt(coordinator.GetMaxLatency(), 10))
+		buffer.WriteString(";")
 		buffer.WriteString("</script>")
 		buffer.Write(html)
 
@@ -26,14 +35,14 @@ func HomeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func startRestServer(port int, db *sql.DB) {
+func startRestServer(port int) {
 	r := mux.NewRouter()
 	r.HandleFunc("/", HomeHandler)
 	http.Handle("/", r)
 
 	srv := &http.Server{
-		Handler:      r,
-		Addr:         fmt.Sprint("127.0.0.1:", port),
+		Handler: r,
+		Addr:    fmt.Sprint("127.0.0.1:", port),
 	}
 	log.Fatal(srv.ListenAndServe())
 }

@@ -17,7 +17,7 @@ type Stream struct {
 
 type LatencyInfo struct {
 	Opaque  uint32
-	Latency int
+	Latency int64
 	Key 	string
 }
 

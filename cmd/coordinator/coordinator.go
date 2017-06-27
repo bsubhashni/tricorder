@@ -2,8 +2,10 @@ package main
 
 import (
 	pb "../../rpc"
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/codahale/hdrhistogram"
 	_ "github.com/mattn/go-sqlite3"
@@ -13,7 +15,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	"bytes"
 )
 
 type AgentsConfig struct {
@@ -21,11 +22,11 @@ type AgentsConfig struct {
 }
 
 type Coordinator struct {
-	config    *Config
-	agentsInfo map[string]*AgentInfo
-	db        *sql.DB
+	config             *Config
+	agentsInfo         map[string]*AgentInfo
+	db                 *sql.DB
 	insertStatementStr string
-	histogram *hdrhistogram.Histogram
+	histogram          *hdrhistogram.Histogram
 }
 
 type AgentInfo struct {
@@ -35,6 +36,11 @@ type AgentInfo struct {
 	conn      *grpc.ClientConn
 	client    pb.AgentServiceClient
 	results   map[string]*pb.AgentResultsResponse_CaptureInfo
+}
+
+type JsonResult struct {
+	timestamp int64    `json:"timestamp"`
+	latencies []string `json:"latencies"`
 }
 
 type Status int
@@ -48,7 +54,7 @@ type LatencyInfo struct {
 	nodeType string
 	opaque   string
 	latency  string
-	key string
+	key      string
 }
 
 func (coordinator *Coordinator) setupStore() {
@@ -67,7 +73,7 @@ func (coordinator *Coordinator) setupStore() {
 		}
 	}
 	s := buffer.String()
-	sqlStmt := fmt.Sprintf("create table ResultStats (opaque text not null, key text, %v); delete from ResultStats;", s)
+	sqlStmt := fmt.Sprintf("create table CaptureResults (opaque_streamId text not null, timestamp integer, %v); delete from CaptureResults;", s)
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
 		log.Fatalf("%q: %s\n", err, sqlStmt)
@@ -85,26 +91,25 @@ func (coordinator *Coordinator) setupStore() {
 	f := fieldsBuffer.String()
 	a := argsBuffer.String()
 
-	statementStr := fmt.Sprintf("insert into ResultStats(opaque, key, %v) values(?, ?, %v)", f, a)
+	statementStr := fmt.Sprintf("insert into CaptureResults(opaque_streamId, timestamp, %v) values(?, ?, %v)", f, a)
 	coordinator.insertStatementStr = statementStr
 	coordinator.db = db
 }
 
 func (coordinator *Coordinator) storeFlusher() {
-	currentTime := time.Now().Second()
-	maxHistoryTime := currentTime + coordinator.config.History.Period*60
+	currentTime := time.Now().UnixNano() / int64(time.Millisecond)
+	maxHistoryTime := currentTime + int64(coordinator.config.History.Period*60)
 	for {
 		if currentTime < maxHistoryTime {
 			time.Sleep(time.Second * time.Duration(maxHistoryTime-currentTime))
-		} else {
-			sqlStmt := `delete from ResultStats;`
-			_, err := coordinator.db.Exec(sqlStmt)
-			if err != nil {
-				log.Fatalf("%q: %s\n", err, sqlStmt)
-				return
-			}
-
 		}
+		sqlStmt := `delete from CaptureResults;`
+		_, err := coordinator.db.Exec(sqlStmt)
+		if err != nil {
+			log.Fatalf("%q: %s\n", err, sqlStmt)
+			return
+		}
+
 	}
 }
 
@@ -163,21 +168,22 @@ func (coordinator *Coordinator) mergeAndStore() {
 	for _, agentInfo := range coordinator.agentsInfo {
 		agentsInfo = append(agentsInfo, agentInfo)
 	}
+	timestamp := time.Now().Unix() * 1000
 
 	for rowKey, row := range agentsInfo[0].results {
-
-		coordinator.histogram.RecordValue(int64(row.Oplatency))
-
+		lat, _ := strconv.ParseInt(row.Oplatency, 10, 64)
+		coordinator.histogram.RecordValue(lat)
 		var args []interface{}
 		args = append(args, rowKey)
-		args = append(args, row.Key)
+		args = append(args, timestamp)
 		args = append(args, row.Oplatency)
-
 		found := false
 		for i := 1; i < len(agentsInfo); i++ {
 			agent := agentsInfo[i]
 			if row := agent.results[rowKey]; row != nil {
 				args = append(args, row.Oplatency)
+				lat, _ := strconv.ParseInt(row.Oplatency, 10, 64)
+				coordinator.histogram.RecordValue(lat)
 				found = true
 			}
 		}
@@ -196,6 +202,56 @@ func (coordinator *Coordinator) mergeAndStore() {
 	}
 
 	tx.Commit()
+}
+
+func (coordinator *Coordinator) getFullCaptureFromDb() (string, error) {
+	tx, err := coordinator.db.Begin()
+	if err != nil {
+		log.Fatal(err)
+	}
+	rows, err := tx.Query("select * from CaptureResults;")
+	defer rows.Close()
+	if err != nil {
+		return "", err
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		return "", err
+	}
+	count := len(columns)
+	tableData := make([]map[string]interface{}, 0)
+	values := make([]interface{}, count)
+	valuePtrs := make([]interface{}, count)
+	for rows.Next() {
+		for i := 0; i < count; i++ {
+			valuePtrs[i] = &values[i]
+		}
+		rows.Scan(valuePtrs...)
+		entry := make(map[string]interface{})
+		for i, col := range columns {
+			var v interface{}
+			val := values[i]
+			b, ok := val.([]byte)
+			if ok {
+				v = string(b)
+			} else {
+				v = val
+			}
+			entry[col] = v
+		}
+		tableData = append(tableData, entry)
+	}
+	tx.Commit()
+
+	jsonData, err := json.Marshal(tableData)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonData), nil
+}
+
+func (coordinator *Coordinator) GetMaxLatency() int64 {
+	return coordinator.histogram.Max()
 }
 
 func (coordinator *Coordinator) getResults(wg *sync.WaitGroup, agentInfo *AgentInfo) {
@@ -243,7 +299,7 @@ func (coordinator *Coordinator) ShutDown() {
 }
 
 func (coordinator *Coordinator) Run() {
-	go startRestServer(9180, coordinator.db)
+	go startRestServer(9180)
 	coordinator.ConnectToAgents()
 	coordinator.setupStore()
 	go coordinator.storeFlusher()

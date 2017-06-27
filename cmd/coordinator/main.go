@@ -10,6 +10,7 @@ import (
 )
 
 var coordinatorConfig Config
+var coordinator *Coordinator
 
 func loadConfig(configFile string) {
 	data, err := ioutil.ReadFile(configFile)
@@ -23,10 +24,10 @@ func loadConfig(configFile string) {
 }
 
 func start() {
-	coordinator := Coordinator{
-		config:    &coordinatorConfig,
+	coordinator = &Coordinator{
+		config:     &coordinatorConfig,
 		agentsInfo: make(map[string]*AgentInfo),
-		histogram: hdrhistogram.New(1, 1000*1000, 3),
+		histogram:  hdrhistogram.New(1, 1000*1000, 3),
 	}
 	coordinator.Run()
 }

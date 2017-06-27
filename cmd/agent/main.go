@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net"
+	"sync"
 )
 
 var agentConfig AgentConfig
@@ -34,6 +35,7 @@ func start() {
 	s := grpc.NewServer()
 	agent := &Agent{
 		config: &agentConfig,
+		mutex: &sync.Mutex{},
 	}
 	agent.Initialize()
 	pb.RegisterAgentServiceServer(s, agent)
