@@ -9,7 +9,7 @@ port: 4816
 #Network capture specifics
 capture:
    #Time intervals between the captures in milliseconds. Use longer time intervals to not starve CPU.
-   interval: 0
+   interval: 500
    #Period for capture in milliseconds. Captures packets from all agents for the specific time period
    period: 500
 

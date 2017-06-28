@@ -1,3 +1,18 @@
+/*
+ * Copyright (c) 2017 Couchbase, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 package main
 
 import (
@@ -8,9 +23,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/codahale/hdrhistogram"
+	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -30,31 +48,55 @@ type Coordinator struct {
 }
 
 type AgentInfo struct {
-	index     int
-	hostname  string
-	connected Status
-	conn      *grpc.ClientConn
-	client    pb.AgentServiceClient
-	results   map[string]*pb.AgentResultsResponse_CaptureInfo
+	index    int
+	hostname string
+	conn     *grpc.ClientConn
+	client   pb.AgentServiceClient
+	results  map[string]*pb.AgentResultsResponse_CaptureInfo
 }
-
-type JsonResult struct {
-	timestamp int64    `json:"timestamp"`
-	latencies []string `json:"latencies"`
-}
-
-type Status int
-
-const (
-	CONNECTED Status = iota
-	DISCONNECTED
-)
 
 type LatencyInfo struct {
 	nodeType string
 	opaque   string
 	latency  string
 	key      string
+}
+
+func (coordinator *Coordinator) homeHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	if html, err := ioutil.ReadFile("./graphplotter/index.html"); err != nil {
+		log.Fatal(err)
+	} else {
+		buffer := bytes.NewBuffer(make([]byte, 0, 1024))
+		jsonStr, err := coordinator.getFullCaptureFromDb()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		buffer.WriteString("<script type=\"text/javascript\">")
+		buffer.WriteString("var data=")
+		buffer.WriteString(jsonStr)
+		buffer.WriteString(";")
+		buffer.WriteString("var yMax=")
+		buffer.WriteString(strconv.FormatInt(coordinator.getMaxLatency(), 10))
+		buffer.WriteString(";")
+		buffer.WriteString("</script>")
+		buffer.Write(html)
+
+		w.Write(buffer.Bytes())
+	}
+}
+
+func (coordinator *Coordinator) startRestServer() {
+	r := mux.NewRouter()
+	r.HandleFunc("/", coordinator.homeHandler)
+	http.Handle("/", r)
+
+	srv := &http.Server{
+		Handler: r,
+		Addr:    fmt.Sprint(":", coordinator.config.RestPort),
+	}
+	log.Fatal(srv.ListenAndServe())
 }
 
 func (coordinator *Coordinator) setupStore() {
@@ -64,7 +106,7 @@ func (coordinator *Coordinator) setupStore() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var buffer bytes.Buffer
+	buffer := bytes.NewBuffer(make([]byte, 0, 1024))
 	for _, agent := range coordinator.agentsInfo {
 		buffer.WriteString(fmt.Sprint("agent", agent.index))
 		buffer.WriteString(" text")
@@ -79,7 +121,8 @@ func (coordinator *Coordinator) setupStore() {
 		log.Fatalf("%q: %s\n", err, sqlStmt)
 		return
 	}
-	var fieldsBuffer, argsBuffer bytes.Buffer
+	fieldsBuffer := bytes.NewBuffer(make([]byte, 0, 1024))
+	argsBuffer := bytes.NewBuffer(make([]byte, 0, 1024))
 	for _, agent := range coordinator.agentsInfo {
 		fieldsBuffer.WriteString(fmt.Sprint("agent", agent.index))
 		argsBuffer.WriteString("?")
@@ -126,11 +169,10 @@ func (coordinator *Coordinator) ConnectToAgents() {
 		}
 		fmt.Println("Connected to the agent", hostName)
 		coordinator.agentsInfo[hostName] = &AgentInfo{
-			index:     ii,
-			hostname:  hostName,
-			connected: CONNECTED,
-			conn:      conn,
-			client:    pb.NewAgentServiceClient(conn),
+			index:    ii,
+			hostname: hostName,
+			conn:     conn,
+			client:   pb.NewAgentServiceClient(conn),
 		}
 	}
 }
@@ -250,7 +292,7 @@ func (coordinator *Coordinator) getFullCaptureFromDb() (string, error) {
 	return string(jsonData), nil
 }
 
-func (coordinator *Coordinator) GetMaxLatency() int64 {
+func (coordinator *Coordinator) getMaxLatency() int64 {
 	return coordinator.histogram.Max()
 }
 
@@ -258,7 +300,7 @@ func (coordinator *Coordinator) getResults(wg *sync.WaitGroup, agentInfo *AgentI
 	if response, err := agentInfo.client.AgentResults(context.Background(), &pb.CoordinatorResultsRequest{}); err != nil {
 		log.Fatalf("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
 	} else {
-		fmt.Println("Got", len(response.CaptureMap), " results from ", agentInfo.hostname)
+		fmt.Println(time.Now().UTC().Format(time.RFC3339Nano)+" Got", len(response.CaptureMap), " results from ", agentInfo.hostname)
 		agentInfo.results = response.CaptureMap
 	}
 	wg.Done()
@@ -299,7 +341,6 @@ func (coordinator *Coordinator) ShutDown() {
 }
 
 func (coordinator *Coordinator) Run() {
-	go startRestServer(9180)
 	coordinator.ConnectToAgents()
 	coordinator.setupStore()
 	go coordinator.storeFlusher()
