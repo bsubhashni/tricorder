@@ -12,7 +12,7 @@
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 * See the License for the specific language governing permissions and
 * limitations under the License.
-*/
+ */
 
 package main
 
@@ -22,6 +22,7 @@ type Config struct {
 	Port     int            `yaml:"port"`
 	History  ResultsHistory `yaml:"history"`
 	RestPort int            `yaml:"restport"`
+	logging  LoggingConfig  `yaml:"log"`
 }
 
 type CaptureConfig struct {
@@ -33,4 +34,9 @@ type CaptureConfig struct {
 type ResultsHistory struct {
 	FileName string `yaml:"file"`
 	Period   int    `yaml:"period"`
+}
+
+type LoggingConfig struct {
+	logLevel string `yaml:"level"`
+	file     string `yaml:"file"`
 }

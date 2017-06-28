@@ -56,9 +56,11 @@
         .attr("transform", "translate("+  (margin.left + margin.right) +",-"+ ( margin.top + margin.bottom)+")")
         .attr("width", "5")
         .attr("height", "5")
-        .attr("fill", "red");
+        .attr("fill", "red")
+        .append("title")
+        .text(function(d) { return d.agent1; })
+        .attr("data-legend", "agent1");
 
-    // draw chart
     svg.selectAll("circle")
         .data(data)
         .enter()
@@ -69,7 +71,8 @@
         .attr("r", "3")
         .attr("fill", "teal");
 
-
+    svg.append("g")
+        .call(d3.legend);
 
 </script>
 </body>

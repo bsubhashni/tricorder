@@ -1,12 +1,9 @@
 #Port configuration for the agent
 port: 3612
 
-#agent mode can be either server or client
-mode: "server"
-
-# Select the network interface to sniff the data. You can use the "any"
-# keyword to sniff on all connected interfaces.
 interface:
+  # Select the network interface to sniff the data. You can use the "any"
+  # keyword to sniff on all connected interfaces.
   device: lo0
   #Tricorder agent supports three sniffer types:
   # * pcap, which uses the libpcap library and works on most platforms, but it's
@@ -20,3 +17,8 @@ interface:
   #memcached port to capture traffic
   port: 11210
 
+log:
+  #Log level for the coordinator
+  #level: debug
+  #File to write logs
+  #file: coordinator.log

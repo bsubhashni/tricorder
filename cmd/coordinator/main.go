@@ -12,17 +12,19 @@
 * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 * See the License for the specific language governing permissions and
 * limitations under the License.
-*/
+ */
 
 package main
 
 import (
+	"../../logger"
 	"flag"
 	"fmt"
 	"github.com/codahale/hdrhistogram"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
+	"strings"
 )
 
 func loadConfig(configFile string, config *Config) {
@@ -42,8 +44,17 @@ func main() {
 	coordinator := &Coordinator{
 		config:     &Config{},
 		agentsInfo: make(map[string]*AgentInfo),
-		histogram:  hdrhistogram.New(1, 5 * 1000 * 1000, 3), //max histogram value for latency 5 secs
+		histogram:  hdrhistogram.New(1, 5*1000*1000, 3), //max histogram value for latency 5 secs
+		logger:     &logger.Logger{},
 	}
 	loadConfig(fmt.Sprint("./", *configFile), coordinator.config)
+	if coordinator.config.logging.logLevel == "" || strings.EqualFold(coordinator.config.logging.logLevel, "info") {
+		coordinator.logger.Init(coordinator.config.logging.file, 1)
+	} else if strings.EqualFold(coordinator.config.logging.logLevel, "error") {
+		coordinator.logger.Init(coordinator.config.logging.file, 0)
+	} else if strings.EqualFold(coordinator.config.logging.logLevel, "debug") {
+		coordinator.logger.Init(coordinator.config.logging.file, 2)
+	}
+
 	coordinator.Run()
 }

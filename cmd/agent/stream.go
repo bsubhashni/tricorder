@@ -1,3 +1,19 @@
+/*
+* Copyright (c) 2017 Couchbase, Inc.
+*
+* Licensed under the Apache License, Version 2.0 (the "License");
+* you may not use this file except in compliance with the License.
+* You may obtain a copy of the License at
+*
+*    http://www.apache.org/licenses/LICENSE-2.0
+*
+* Unless required by applicable law or agreed to in writing, software
+* distributed under the License is distributed on an "AS IS" BASIS,
+* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+* See the License for the specific language governing permissions and
+* limitations under the License.
+*/
+
 package main
 
 import (
@@ -6,19 +22,19 @@ import (
 )
 
 type Stream struct {
-	mutex				*sync.Mutex
-	currentRequests  	map[uint32]*Command
-	currentResponses 	map[uint32]*Command
-	currentCommand   	*Command
-	src              	string
-	dst              	string
-	latencyInfo         []LatencyInfo
+	mutex            *sync.Mutex
+	currentRequests  map[uint32]*Command
+	currentResponses map[uint32]*Command
+	currentCommand   *Command
+	src              string
+	dst              string
+	latencyInfo      []LatencyInfo
 }
 
 type LatencyInfo struct {
 	Opaque  uint32
 	Latency int64
-	Key 	string
+	Key     string
 }
 
 func (stream *Stream) collect() {
@@ -36,7 +52,7 @@ func (stream *Stream) collect() {
 					latencyInfo := LatencyInfo{
 						Opaque:  opaque,
 						Latency: (response.captureTimeInNanos - request.captureTimeInNanos) / 1000,
-						Key: string(request.key),
+						Key:     string(request.key),
 					}
 					stream.latencyInfo = append(stream.latencyInfo, latencyInfo)
 					delete(stream.currentRequests, opaque)

@@ -13,9 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package main
 
 import (
+	"../../logger"
 	pb "../../rpc"
 	"bytes"
 	"context"
@@ -27,11 +29,12 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 	"google.golang.org/grpc"
 	"io/ioutil"
-	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -45,6 +48,7 @@ type Coordinator struct {
 	db                 *sql.DB
 	insertStatementStr string
 	histogram          *hdrhistogram.Histogram
+	logger             *logger.Logger
 }
 
 type AgentInfo struct {
@@ -62,15 +66,28 @@ type LatencyInfo struct {
 	key      string
 }
 
-func (coordinator *Coordinator) homeHandler(w http.ResponseWriter, r *http.Request) {
+func (c *Coordinator) homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	if html, err := ioutil.ReadFile("./graphplotter/index.html"); err != nil {
-		log.Fatal(err)
+		c.logger.Error("%v", err)
+		c.shutdown()
 	} else {
 		buffer := bytes.NewBuffer(make([]byte, 0, 1024))
-		jsonStr, err := coordinator.getFullCaptureFromDb()
+		jsonStr, err := c.getFullCaptureFromDb()
 		if err != nil {
-			log.Fatal(err)
+			c.logger.Error("Unable to full capture results from db due to %v", err)
+			os.Exit(1)
+		}
+
+		var agents []string
+		for agent, _ := range c.agentsInfo {
+			agents = append(agents, agent)
+		}
+
+		agentsJson, err := json.Marshal(agents)
+		if err != nil {
+			c.logger.Error("%v", err)
+			c.shutdown()
 		}
 
 		buffer.WriteString("<script type=\"text/javascript\">")
@@ -78,8 +95,10 @@ func (coordinator *Coordinator) homeHandler(w http.ResponseWriter, r *http.Reque
 		buffer.WriteString(jsonStr)
 		buffer.WriteString(";")
 		buffer.WriteString("var yMax=")
-		buffer.WriteString(strconv.FormatInt(coordinator.getMaxLatency(), 10))
+		buffer.WriteString(strconv.FormatInt(c.getMaxLatency(), 10))
 		buffer.WriteString(";")
+		buffer.WriteString("var agents=")
+		buffer.WriteString(string(agentsJson))
 		buffer.WriteString("</script>")
 		buffer.Write(html)
 
@@ -87,70 +106,76 @@ func (coordinator *Coordinator) homeHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (coordinator *Coordinator) startRestServer() {
+func (c *Coordinator) startRestServer() {
 	r := mux.NewRouter()
-	r.HandleFunc("/", coordinator.homeHandler)
+	r.HandleFunc("/", c.homeHandler)
 	http.Handle("/", r)
 
 	srv := &http.Server{
 		Handler: r,
-		Addr:    fmt.Sprint(":", coordinator.config.RestPort),
+		Addr:    fmt.Sprint(":", c.config.RestPort),
 	}
-	log.Fatal(srv.ListenAndServe())
+	err := srv.ListenAndServe()
+	if err != nil {
+		c.logger.Error("%v", err)
+		c.shutdown()
+	}
 }
 
-func (coordinator *Coordinator) setupStore() {
-	file := coordinator.config.History.FileName
+func (c *Coordinator) setupStore() {
+	file := c.config.History.FileName
 	os.Remove(file)
 	db, err := sql.Open("sqlite3", file)
 	if err != nil {
-		log.Fatal(err)
+		c.logger.Error("%v", err)
+		c.shutdown()
 	}
-	buffer := bytes.NewBuffer(make([]byte, 0, 1024))
-	for _, agent := range coordinator.agentsInfo {
-		buffer.WriteString(fmt.Sprint("agent", agent.index))
-		buffer.WriteString(" text")
-		if agent.index < (len(coordinator.agentsInfo) - 1) {
-			buffer.WriteString(", ")
+
+	var cols string
+	for i := 0; i < len(c.agentsInfo); i++ {
+		agent := c.agentsInfo["agent"+strconv.Itoa(i)]
+		cols += fmt.Sprint("agent", agent.index)
+		cols += " text"
+		if agent.index < (len(c.agentsInfo) - 1) {
+			cols += ", "
 		}
 	}
-	s := buffer.String()
-	sqlStmt := fmt.Sprintf("create table CaptureResults (opaque_streamId text not null, timestamp integer, %v); delete from CaptureResults;", s)
+
+	sqlStmt := fmt.Sprintf("create table CaptureResults (opaque_streamId text not null, timestamp integer, %v); delete from CaptureResults;", cols)
 	_, err = db.Exec(sqlStmt)
 	if err != nil {
-		log.Fatalf("%q: %s\n", err, sqlStmt)
-		return
+		c.logger.Error("%q: %s\n", err, sqlStmt)
+		c.shutdown()
 	}
-	fieldsBuffer := bytes.NewBuffer(make([]byte, 0, 1024))
-	argsBuffer := bytes.NewBuffer(make([]byte, 0, 1024))
-	for _, agent := range coordinator.agentsInfo {
-		fieldsBuffer.WriteString(fmt.Sprint("agent", agent.index))
-		argsBuffer.WriteString("?")
-		if agent.index < (len(coordinator.agentsInfo) - 1) {
-			fieldsBuffer.WriteString(", ")
-			argsBuffer.WriteString(", ")
+
+	var fieldStr, argsStr string
+	for i := 0; i < len(c.agentsInfo); i++ {
+		agent := c.agentsInfo["agent"+strconv.Itoa(i)]
+		fieldStr += fmt.Sprint("agent", agent.index)
+		argsStr += "?"
+		if agent.index < (len(c.agentsInfo) - 1) {
+			fieldStr += ", "
+			argsStr += ", "
 		}
 	}
-	f := fieldsBuffer.String()
-	a := argsBuffer.String()
 
-	statementStr := fmt.Sprintf("insert into CaptureResults(opaque_streamId, timestamp, %v) values(?, ?, %v)", f, a)
-	coordinator.insertStatementStr = statementStr
-	coordinator.db = db
+	statementStr := fmt.Sprintf("insert into CaptureResults(opaque_streamId, timestamp, %v) values(?, ?, %v)", fieldStr, argsStr)
+	c.insertStatementStr = statementStr
+	c.db = db
 }
 
-func (coordinator *Coordinator) storeFlusher() {
+func (c *Coordinator) storeFlusher() {
 	currentTime := time.Now().UnixNano() / int64(time.Millisecond)
-	maxHistoryTime := currentTime + int64(coordinator.config.History.Period*60)
+	maxHistoryTime := currentTime + int64(c.config.History.Period*60)
 	for {
 		if currentTime < maxHistoryTime {
 			time.Sleep(time.Second * time.Duration(maxHistoryTime-currentTime))
 		}
 		sqlStmt := `delete from CaptureResults;`
-		_, err := coordinator.db.Exec(sqlStmt)
+		_, err := c.db.Exec(sqlStmt)
 		if err != nil {
-			log.Fatalf("%q: %s\n", err, sqlStmt)
-			return
+			c.logger.Error("Cannot execute %q: %s\n", err, sqlStmt)
+			c.shutdown()
 		}
 
 	}
@@ -160,15 +185,16 @@ func connectToAgent(hostName string) (*grpc.ClientConn, error) {
 	return grpc.Dial(hostName, grpc.WithInsecure())
 }
 
-func (coordinator *Coordinator) ConnectToAgents() {
-	for ii, hostName := range coordinator.config.Agents {
+func (c *Coordinator) ConnectToAgents() {
+	for ii, hostName := range c.config.Agents {
 
 		conn, err := connectToAgent(hostName)
 		if err != nil {
-			log.Fatalf("Unable to connect to the Agent %v %v", err, hostName)
+			c.logger.Error("Unable to connect to the Agent %v %v", err, hostName)
+			os.Exit(1)
 		}
-		fmt.Println("Connected to the agent", hostName)
-		coordinator.agentsInfo[hostName] = &AgentInfo{
+		c.logger.Info("Connected to the agent %v", hostName)
+		c.agentsInfo["agent"+strconv.Itoa(ii)] = &AgentInfo{
 			index:    ii,
 			hostname: hostName,
 			conn:     conn,
@@ -177,44 +203,47 @@ func (coordinator *Coordinator) ConnectToAgents() {
 	}
 }
 
-func (coordinator *Coordinator) startCapture(wg *sync.WaitGroup, agentInfo *AgentInfo) {
-	_, err := agentInfo.client.CaptureSignal(context.Background(), &pb.CoordinatorCaptureRequest{SequencePrefix: int32(agentInfo.index)})
+func (c *Coordinator) startCapture(wg *sync.WaitGroup, agentInfo *AgentInfo) {
+	_, err := agentInfo.client.CaptureSignal(context.Background(), &pb.CoordinatorCaptureRequest{})
 	if err != nil {
-		log.Fatalf("Unable to start capture on agent %s due to %v", agentInfo.hostname, err)
+		c.logger.Error("Unable to start capture on agent %s due to %v", agentInfo.hostname, err)
+		c.shutdown()
 	}
 	wg.Done()
 }
 
-func (coordinator *Coordinator) StartCapture() {
+func (c *Coordinator) StartCapture() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentsInfo))
-	for _, agent := range coordinator.agentsInfo {
-		go coordinator.startCapture(&wg, agent)
+	wg.Add(len(c.agentsInfo))
+	for _, agent := range c.agentsInfo {
+		go c.startCapture(&wg, agent)
 	}
 	wg.Wait()
 }
 
-func (coordinator *Coordinator) mergeAndStore() {
-	tx, err := coordinator.db.Begin()
+func (c *Coordinator) mergeAndStore() {
+	tx, err := c.db.Begin()
 	if err != nil {
-		log.Fatal(err)
+		c.logger.Error("Unable start tx in store %v", err)
+		c.shutdown()
 	}
 
-	stmt, err := tx.Prepare(coordinator.insertStatementStr)
+	stmt, err := tx.Prepare(c.insertStatementStr)
 
 	if err != nil {
-		log.Fatalf("%v", err)
+		c.logger.Error("Unable to prepare statement for store %v %v", c.insertStatementStr, err)
+		c.shutdown()
 	}
 
 	var agentsInfo []*AgentInfo
-	for _, agentInfo := range coordinator.agentsInfo {
+	for _, agentInfo := range c.agentsInfo {
 		agentsInfo = append(agentsInfo, agentInfo)
 	}
 	timestamp := time.Now().Unix() * 1000
 
 	for rowKey, row := range agentsInfo[0].results {
 		lat, _ := strconv.ParseInt(row.Oplatency, 10, 64)
-		coordinator.histogram.RecordValue(lat)
+		c.histogram.RecordValue(lat)
 		var args []interface{}
 		args = append(args, rowKey)
 		args = append(args, timestamp)
@@ -225,7 +254,7 @@ func (coordinator *Coordinator) mergeAndStore() {
 			if row := agent.results[rowKey]; row != nil {
 				args = append(args, row.Oplatency)
 				lat, _ := strconv.ParseInt(row.Oplatency, 10, 64)
-				coordinator.histogram.RecordValue(lat)
+				c.histogram.RecordValue(lat)
 				found = true
 			}
 		}
@@ -235,7 +264,8 @@ func (coordinator *Coordinator) mergeAndStore() {
 
 		_, err = stmt.Exec(args...)
 		if err != nil {
-			log.Fatal(err)
+			c.logger.Error("Error executing insert %v", err)
+			c.shutdown()
 		}
 	}
 
@@ -246,15 +276,18 @@ func (coordinator *Coordinator) mergeAndStore() {
 	tx.Commit()
 }
 
-func (coordinator *Coordinator) getFullCaptureFromDb() (string, error) {
-	tx, err := coordinator.db.Begin()
+func (c *Coordinator) getFullCaptureFromDb() (string, error) {
+	tx, err := c.db.Begin()
 	if err != nil {
-		log.Fatal(err)
+		c.logger.Error("Error on db tx %v", err)
+		os.Exit(1)
 	}
+	c.logger.Debug("Executing select query")
 	rows, err := tx.Query("select * from CaptureResults;")
 	defer rows.Close()
 	if err != nil {
-		return "", err
+		c.logger.Error("Error executing select statement %v", err)
+		os.Exit(1)
 	}
 	columns, err := rows.Columns()
 	if err != nil {
@@ -287,70 +320,87 @@ func (coordinator *Coordinator) getFullCaptureFromDb() (string, error) {
 
 	jsonData, err := json.Marshal(tableData)
 	if err != nil {
+
 		return "", err
 	}
 	return string(jsonData), nil
 }
 
-func (coordinator *Coordinator) getMaxLatency() int64 {
-	return coordinator.histogram.Max()
+func (c *Coordinator) getMaxLatency() int64 {
+	return c.histogram.Max()
 }
 
-func (coordinator *Coordinator) getResults(wg *sync.WaitGroup, agentInfo *AgentInfo) {
+func (c *Coordinator) getResults(wg *sync.WaitGroup, agentInfo *AgentInfo) {
 	if response, err := agentInfo.client.AgentResults(context.Background(), &pb.CoordinatorResultsRequest{}); err != nil {
-		log.Fatalf("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
+		c.logger.Error("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
+		c.shutdown()
 	} else {
-		fmt.Println(time.Now().UTC().Format(time.RFC3339Nano)+" Got", len(response.CaptureMap), " results from ", agentInfo.hostname)
+		c.logger.Info("Got %v capture results from %v", len(response.CaptureMap), agentInfo.hostname)
 		agentInfo.results = response.CaptureMap
 	}
 	wg.Done()
 }
 
-func (coordinator *Coordinator) GetResults() {
+func (c *Coordinator) GetResults() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentsInfo))
-	for _, agent := range coordinator.agentsInfo {
-		go coordinator.getResults(&wg, agent)
+	wg.Add(len(c.agentsInfo))
+	for _, agent := range c.agentsInfo {
+		go c.getResults(&wg, agent)
 	}
 	wg.Wait()
 }
 
-func (coordinator *Coordinator) sayGoodBye(wg *sync.WaitGroup, agentInfo *AgentInfo) {
+func (c *Coordinator) sayGoodBye(wg *sync.WaitGroup, agentInfo *AgentInfo) {
 	_, err := agentInfo.client.AgentResults(context.Background(), &pb.CoordinatorResultsRequest{})
 	if err != nil {
-		log.Fatalf("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
+		c.logger.Error("Unable to get results from agent %s due to %v", agentInfo.hostname, err)
+		os.Exit(1)
 	}
 	wg.Done()
 }
 
-func (coordinator *Coordinator) sayGoodbye(wg *sync.WaitGroup, agentInfo *AgentInfo) {
-	_, err := agentInfo.client.GoodByeSignal(nil, &pb.CoordinatorGoodByeRequest{})
+func (c *Coordinator) sayGoodbye(wg *sync.WaitGroup, agentInfo *AgentInfo) {
+	c.logger.Info("Saying goodbye to %v", agentInfo.hostname)
+	_, err := agentInfo.client.GoodByeSignal(context.Background(), &pb.CoordinatorGoodByeRequest{})
 	if err != nil {
-		log.Fatalf("Unable to say good bye to agent %s due to %v", agentInfo.hostname, err)
+		c.logger.Error("Unable to say good bye to agent %s due to %v", agentInfo.hostname, err)
+		os.Exit(1)
 	}
 	wg.Done()
 }
 
-func (coordinator *Coordinator) ShutDown() {
+func (c *Coordinator) shutdown() {
 	wg := sync.WaitGroup{}
-	wg.Add(len(coordinator.agentsInfo))
-	for _, agent := range coordinator.agentsInfo {
-		go coordinator.sayGoodbye(&wg, agent)
+	wg.Add(len(c.agentsInfo))
+	for _, agent := range c.agentsInfo {
+		go c.sayGoodbye(&wg, agent)
 	}
 	wg.Wait()
+	os.Exit(1)
 }
 
-func (coordinator *Coordinator) Run() {
-	coordinator.ConnectToAgents()
-	coordinator.setupStore()
-	go coordinator.storeFlusher()
+func (c *Coordinator) cleanupOnTermination() {
+	ch := make(chan os.Signal, 2)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ch
+		c.shutdown()
+	}()
+}
+
+func (c *Coordinator) Run() {
+	c.ConnectToAgents()
+	c.setupStore()
+	go c.startRestServer()
+	go c.storeFlusher()
+	go c.cleanupOnTermination()
 
 	for {
-		coordinator.StartCapture()
-		time.Sleep(time.Duration(coordinator.config.Capture.Period) * time.Millisecond)
-		coordinator.GetResults()
-		go coordinator.mergeAndStore()
-		time.Sleep(time.Duration(coordinator.config.Capture.Interval) * time.Millisecond)
+		c.StartCapture()
+		time.Sleep(time.Duration(c.config.Capture.Period) * time.Millisecond)
+		c.GetResults()
+		go c.mergeAndStore()
+		time.Sleep(time.Duration(c.config.Capture.Interval) * time.Millisecond)
 	}
-	coordinator.ShutDown()
+
 }
